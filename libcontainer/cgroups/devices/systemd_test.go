@@ -2,6 +2,7 @@ package devices
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -9,7 +10,6 @@ import (
 
 	"github.com/opencontainers/runc/libcontainer/cgroups"
 	"github.com/opencontainers/runc/libcontainer/cgroups/systemd"
-	"github.com/opencontainers/runc/libcontainer/configs"
 	"github.com/opencontainers/runc/libcontainer/devices"
 )
 
@@ -27,11 +27,11 @@ func TestPodSkipDevicesUpdate(t *testing.T) {
 	}
 
 	podName := "system-runc_test_pod" + t.Name() + ".slice"
-	podConfig := &configs.Cgroup{
+	podConfig := &cgroups.Cgroup{
 		Systemd: true,
 		Parent:  "system.slice",
 		Name:    podName,
-		Resources: &configs.Resources{
+		Resources: &cgroups.Resources{
 			PidsLimit:   42,
 			Memory:      32 * 1024 * 1024,
 			SkipDevices: true,
@@ -46,11 +46,11 @@ func TestPodSkipDevicesUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	containerConfig := &configs.Cgroup{
+	containerConfig := &cgroups.Cgroup{
 		Parent:      podName,
 		ScopePrefix: "test",
 		Name:        "PodSkipDevicesUpdate",
-		Resources: &configs.Resources{
+		Resources: &cgroups.Resources{
 			Devices: []*devices.Rule{
 				// Allow access to /dev/null.
 				{
@@ -66,7 +66,7 @@ func TestPodSkipDevicesUpdate(t *testing.T) {
 
 	// Create a "container" within the "pod" cgroup.
 	// This is not a real container, just a process in the cgroup.
-	cmd := exec.Command("bash", "-c", "while true; do echo > /dev/null; done")
+	cmd := exec.Command("sleep", "infinity")
 	cmd.Env = append(os.Environ(), "LANG=C")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -123,10 +123,10 @@ func testSkipDevices(t *testing.T, skipDevices bool, expected []string) {
 		t.Skip("Test requires root.")
 	}
 
-	podConfig := &configs.Cgroup{
+	podConfig := &cgroups.Cgroup{
 		Parent: "system.slice",
 		Name:   "system-runc_test_pods.slice",
-		Resources: &configs.Resources{
+		Resources: &cgroups.Resources{
 			SkipDevices: skipDevices,
 		},
 	}
@@ -139,11 +139,11 @@ func testSkipDevices(t *testing.T, skipDevices bool, expected []string) {
 		t.Fatal(err)
 	}
 
-	config := &configs.Cgroup{
+	config := &cgroups.Cgroup{
 		Parent:      "system-runc_test_pods.slice",
 		ScopePrefix: "test",
 		Name:        "SkipDevices",
-		Resources: &configs.Resources{
+		Resources: &cgroups.Resources{
 			Devices: []*devices.Rule{
 				// Allow access to /dev/full only.
 				{
@@ -235,7 +235,33 @@ func TestSkipDevicesFalse(t *testing.T) {
 	})
 }
 
-func newManager(t *testing.T, config *configs.Cgroup) (m cgroups.Manager) {
+func testFindDeviceGroup() error {
+	const (
+		major = 136
+		group = "char-pts"
+	)
+	res, err := findDeviceGroup(devices.CharDevice, major)
+	if res != group || err != nil {
+		return fmt.Errorf("expected %v, nil, got %v, %w", group, res, err)
+	}
+	return nil
+}
+
+func TestFindDeviceGroup(t *testing.T) {
+	if err := testFindDeviceGroup(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func BenchmarkFindDeviceGroup(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		if err := testFindDeviceGroup(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func newManager(t *testing.T, config *cgroups.Cgroup) (m cgroups.Manager) {
 	t.Helper()
 	var err error
 

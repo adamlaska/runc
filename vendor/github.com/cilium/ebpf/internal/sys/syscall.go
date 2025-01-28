@@ -11,7 +11,7 @@ import (
 // ENOTSUPP is a Linux internal error code that has leaked into UAPI.
 //
 // It is not the same as ENOTSUP or EOPNOTSUPP.
-var ENOTSUPP = syscall.Errno(524)
+const ENOTSUPP = syscall.Errno(524)
 
 // BPF wraps SYS_BPF.
 //
@@ -19,7 +19,7 @@ var ENOTSUPP = syscall.Errno(524)
 func BPF(cmd Cmd, attr unsafe.Pointer, size uintptr) (uintptr, error) {
 	// Prevent the Go profiler from repeatedly interrupting the verifier,
 	// which could otherwise lead to a livelock due to receiving EAGAIN.
-	if cmd == BPF_PROG_LOAD {
+	if cmd == BPF_PROG_LOAD || cmd == BPF_PROG_RUN {
 		maskProfilerSignal()
 		defer unmaskProfilerSignal()
 	}
@@ -71,9 +71,49 @@ func (i *LinkInfo) info() (unsafe.Pointer, uint32) {
 	return unsafe.Pointer(i), uint32(unsafe.Sizeof(*i))
 }
 
+func (i *TracingLinkInfo) info() (unsafe.Pointer, uint32) {
+	return unsafe.Pointer(i), uint32(unsafe.Sizeof(*i))
+}
+
+func (i *CgroupLinkInfo) info() (unsafe.Pointer, uint32) {
+	return unsafe.Pointer(i), uint32(unsafe.Sizeof(*i))
+}
+
+func (i *NetNsLinkInfo) info() (unsafe.Pointer, uint32) {
+	return unsafe.Pointer(i), uint32(unsafe.Sizeof(*i))
+}
+
+func (i *XDPLinkInfo) info() (unsafe.Pointer, uint32) {
+	return unsafe.Pointer(i), uint32(unsafe.Sizeof(*i))
+}
+
+func (i *TcxLinkInfo) info() (unsafe.Pointer, uint32) {
+	return unsafe.Pointer(i), uint32(unsafe.Sizeof(*i))
+}
+
+func (i *NetfilterLinkInfo) info() (unsafe.Pointer, uint32) {
+	return unsafe.Pointer(i), uint32(unsafe.Sizeof(*i))
+}
+
+func (i *NetkitLinkInfo) info() (unsafe.Pointer, uint32) {
+	return unsafe.Pointer(i), uint32(unsafe.Sizeof(*i))
+}
+
+func (i *KprobeMultiLinkInfo) info() (unsafe.Pointer, uint32) {
+	return unsafe.Pointer(i), uint32(unsafe.Sizeof(*i))
+}
+
+func (i *KprobeLinkInfo) info() (unsafe.Pointer, uint32) {
+	return unsafe.Pointer(i), uint32(unsafe.Sizeof(*i))
+}
+
 var _ Info = (*BtfInfo)(nil)
 
 func (i *BtfInfo) info() (unsafe.Pointer, uint32) {
+	return unsafe.Pointer(i), uint32(unsafe.Sizeof(*i))
+}
+
+func (i *PerfEventLinkInfo) info() (unsafe.Pointer, uint32) {
 	return unsafe.Pointer(i), uint32(unsafe.Sizeof(*i))
 }
 
@@ -93,12 +133,12 @@ func ObjInfo(fd *FD, info Info) error {
 
 // BPFObjName is a null-terminated string made up of
 // 'A-Za-z0-9_' characters.
-type ObjName [unix.BPF_OBJ_NAME_LEN]byte
+type ObjName [BPF_OBJ_NAME_LEN]byte
 
 // NewObjName truncates the result if it is too long.
 func NewObjName(name string) ObjName {
 	var result ObjName
-	copy(result[:unix.BPF_OBJ_NAME_LEN-1], name)
+	copy(result[:BPF_OBJ_NAME_LEN-1], name)
 	return result
 }
 
@@ -117,8 +157,27 @@ type LinkID uint32
 // BTFID uniquely identifies a BTF blob loaded into the kernel.
 type BTFID uint32
 
-// MapFlags control map behaviour.
-type MapFlags uint32
+// TypeID identifies a type in a BTF blob.
+type TypeID uint32
+
+// Flags used by bpf_mprog.
+const (
+	BPF_F_REPLACE = 1 << (iota + 2)
+	BPF_F_BEFORE
+	BPF_F_AFTER
+	BPF_F_ID
+	BPF_F_LINK_MPROG = 1 << 13 // aka BPF_F_LINK
+)
+
+// Flags used by BPF_PROG_LOAD.
+const (
+	BPF_F_SLEEPABLE          = 1 << 4
+	BPF_F_XDP_HAS_FRAGS      = 1 << 5
+	BPF_F_XDP_DEV_BOUND_ONLY = 1 << 6
+)
+
+const BPF_TAG_SIZE = 8
+const BPF_OBJ_NAME_LEN = 16
 
 // wrappedErrno wraps syscall.Errno to prevent direct comparisons with
 // syscall.E* or unix.E* constants.

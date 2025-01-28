@@ -18,6 +18,7 @@ import (
 	"github.com/opencontainers/runc/libcontainer"
 	"github.com/opencontainers/runc/libcontainer/configs"
 	"github.com/opencontainers/runc/libcontainer/specconv"
+	"github.com/opencontainers/runc/libcontainer/system/kernelversion"
 	"github.com/opencontainers/runc/libcontainer/utils"
 )
 
@@ -54,6 +55,8 @@ func newProcess(p specs.Process) (*libcontainer.Process, error) {
 		Label:           p.SelinuxLabel,
 		NoNewPrivileges: &p.NoNewPrivileges,
 		AppArmorProfile: p.ApparmorProfile,
+		Scheduler:       p.Scheduler,
+		IOPriority:      p.IOPriority,
 	}
 
 	if p.ConsoleSize != nil {
@@ -80,12 +83,6 @@ func newProcess(p specs.Process) (*libcontainer.Process, error) {
 		lp.Rlimits = append(lp.Rlimits, rl)
 	}
 	return lp, nil
-}
-
-func destroy(container *libcontainer.Container) {
-	if err := container.Destroy(); err != nil {
-		logrus.Error(err)
-	}
 }
 
 // setupIO modifies the given process config according to the options.
@@ -138,9 +135,8 @@ func setupIO(process *libcontainer.Process, rootuid, rootgid int, createTTY, det
 	return setupProcessPipes(process, rootuid, rootgid)
 }
 
-// createPidFile creates a file with the processes pid inside it atomically
-// it creates a temp file with the paths filename + '.' infront of it
-// then renames the file
+// createPidFile creates a file containing the PID,
+// doing so atomically (via create and rename).
 func createPidFile(path string, process *libcontainer.Process) error {
 	pid, err := process.Pid()
 	if err != nil {
@@ -193,6 +189,7 @@ type runner struct {
 	preserveFDs     int
 	pidFile         string
 	consoleSocket   string
+	pidfdSocket     string
 	container       *libcontainer.Container
 	action          CtAct
 	notifySocket    *notifySocket
@@ -223,8 +220,10 @@ func (r *runner) run(config *specs.Process) (int, error) {
 		process.ExtraFiles = append(process.ExtraFiles, r.listenFDs...)
 	}
 	baseFd := 3 + len(process.ExtraFiles)
+	procSelfFd, closer := utils.ProcThreadSelf("fd/")
+	defer closer()
 	for i := baseFd; i < baseFd+r.preserveFDs; i++ {
-		_, err = os.Stat("/proc/self/fd/" + strconv.Itoa(i))
+		_, err = os.Stat(filepath.Join(procSelfFd, strconv.Itoa(i)))
 		if err != nil {
 			return -1, fmt.Errorf("unable to stat preserved-fd %d (of %d): %w", i-baseFd, r.preserveFDs, err)
 		}
@@ -248,6 +247,14 @@ func (r *runner) run(config *specs.Process) (int, error) {
 		return -1, err
 	}
 	defer tty.Close()
+
+	if r.pidfdSocket != "" {
+		connClose, err := setupPidfdSocket(process, r.pidfdSocket)
+		if err != nil {
+			return -1, err
+		}
+		defer connClose()
+	}
 
 	switch r.action {
 	case CT_ACT_CREATE:
@@ -288,7 +295,9 @@ func (r *runner) run(config *specs.Process) (int, error) {
 
 func (r *runner) destroy() {
 	if r.shouldDestroy {
-		destroy(r.container)
+		if err := r.container.Destroy(); err != nil {
+			logrus.Warn(err)
+		}
 	}
 }
 
@@ -384,6 +393,7 @@ func startContainer(context *cli.Context, action CtAct, criuOpts *libcontainer.C
 		listenFDs:       listenFDs,
 		notifySocket:    notifySocket,
 		consoleSocket:   context.String("console-socket"),
+		pidfdSocket:     context.String("pidfd-socket"),
 		detach:          context.Bool("detach"),
 		pidFile:         context.String("pid-file"),
 		preserveFDs:     context.Int("preserve-fds"),
@@ -392,4 +402,37 @@ func startContainer(context *cli.Context, action CtAct, criuOpts *libcontainer.C
 		init:            true,
 	}
 	return r.run(spec.Process)
+}
+
+func setupPidfdSocket(process *libcontainer.Process, sockpath string) (_clean func(), _ error) {
+	linux530 := kernelversion.KernelVersion{Kernel: 5, Major: 3}
+	ok, err := kernelversion.GreaterEqualThan(linux530)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("--pidfd-socket requires >= v5.3 kernel")
+	}
+
+	conn, err := net.Dial("unix", sockpath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to dail %s: %w", sockpath, err)
+	}
+
+	uc, ok := conn.(*net.UnixConn)
+	if !ok {
+		conn.Close()
+		return nil, errors.New("failed to cast to UnixConn")
+	}
+
+	socket, err := uc.File()
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to dup socket: %w", err)
+	}
+
+	process.PidfdSocket = socket
+	return func() {
+		conn.Close()
+	}, nil
 }

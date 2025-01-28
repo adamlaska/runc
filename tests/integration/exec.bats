@@ -125,8 +125,23 @@ function teardown() {
 
 	runc exec --user 1000:1000 test_busybox id
 	[ "$status" -eq 0 ]
-
 	[[ "${output}" == "uid=1000 gid=1000"* ]]
+}
+
+# https://github.com/opencontainers/runc/issues/3674.
+@test "runc exec --user vs /dev/null ownership" {
+	requires root
+
+	runc run -d --console-socket "$CONSOLE_SOCKET" test_busybox
+	[ "$status" -eq 0 ]
+
+	ls -l /dev/null
+	__runc exec -d --user 1000:1000 test_busybox id </dev/null
+	ls -l /dev/null
+	UG=$(stat -c %u:%g /dev/null)
+
+	# Host's /dev/null must be owned by root.
+	[ "$UG" = "0:0" ]
 }
 
 @test "runc exec --additional-gids" {
@@ -219,12 +234,12 @@ function check_exec_debug() {
 	# Check we can join top-level cgroup (implicit).
 	runc exec test_busybox cat /proc/self/cgroup
 	[ "$status" -eq 0 ]
-	! grep -v ":$REL_CGROUPS_PATH\$" <<<"$output"
+	run ! grep -v ":$REL_CGROUPS_PATH\$" <<<"$output"
 
 	# Check we can join top-level cgroup (explicit).
 	runc exec --cgroup / test_busybox cat /proc/self/cgroup
 	[ "$status" -eq 0 ]
-	! grep -v ":$REL_CGROUPS_PATH\$" <<<"$output"
+	run ! grep -v ":$REL_CGROUPS_PATH\$" <<<"$output"
 
 	# Create a few subcgroups.
 	# Note that cpu,cpuacct may be mounted together or separate.
@@ -306,4 +321,22 @@ function check_exec_debug() {
 	[ "$status" -eq 0 ]
 	runc exec --cgroup second test_busybox grep -w second /proc/self/cgroup
 	[ "$status" -eq 0 ]
+}
+
+@test "runc exec [execve error]" {
+	cat <<EOF >rootfs/run.sh
+#!/mmnnttbb foo bar
+sh
+EOF
+	chmod +x rootfs/run.sh
+	runc run -d --console-socket "$CONSOLE_SOCKET" test_busybox
+	runc exec -t test_busybox /run.sh
+	[ "$status" -ne 0 ]
+
+	# After the sync socket closed, we should not send error to parent
+	# process, or else we will get a unnecessary error log(#4171).
+	# Although we never close the sync socket when doing exec,
+	# but we need to keep this test to ensure this behavior is always right.
+	[ ${#lines[@]} -eq 1 ]
+	[[ ${lines[0]} = *"exec /run.sh: no such file or directory"* ]]
 }
